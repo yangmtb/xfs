@@ -1,5 +1,5 @@
-#ifndef __SB_H__
-#define __SB_H__
+#ifndef __XFS_SB_H__
+#define __XFS_SB_H__
 
 #include "xfs_common.h"
 
@@ -82,4 +82,7 @@ typedef struct xfs_dsb {
     // must be padded to 64 bit alignment
 }xfs_dsb_t;
 
-#endif //__SB_H__
+// error:1 success:0 return value in sb
+extern int parse_buff_to_superblock(xfs_dsb_t *sb, const char buf[512], const XFS_ENDIAN_ENUM end);
+
+#endif //__XFS_SB_H__
