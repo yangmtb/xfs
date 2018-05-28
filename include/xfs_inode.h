@@ -5,7 +5,9 @@
 #include "xfs_sb.h"
 
 #define XFS_INODE_MAGIC 0x494e // 'IN'
-#define XFS_DIR3_MAGIC 0x58444233 // 'XDB3'
+#define XFS_DIR3_BLOCK_MAGIC 0x58444233 // 'XDB3': single block dirs
+#define XFS_DIR3_DATA_MAGIC 0x58444433 // 'XDD3': multiblock dirs
+#define XFS_DIR3_FREE_MAGIC 0x58444633 // 'XDF3': free index blocks
 
 typedef enum xfs_dinode_fmt {
     XFS_DINODE_FMT_DEV,   // xfs_dev_t
@@ -55,7 +57,8 @@ typedef struct {
 
 typedef enum dir_sub_type {
     DIR_SUB_FILE = 1,
-    DIR_SUB_DIR = 2
+    DIR_SUB_DIR = 2,
+    DIR_SUB_LNK = 7
 }dir_sub_type_t;
 
 typedef struct {
@@ -108,6 +111,7 @@ typedef struct xfs_inode {
 
     // extent (file always)
     ext_info_t *exts;
+    int extcount;
     // dir (inline)
     struct {
         __u8 count;
@@ -118,6 +122,8 @@ typedef struct xfs_inode {
     // dir extent
     xfs_dir3_data_hdr_t dirhdr;
     xfs_dir3_entry_t *entry; // util 0xffff
+    // lnk file
+    char *lnk_path;
 }xfs_inode_t;
 
 typedef struct xfs_dir_ext {
@@ -163,7 +169,7 @@ extern int blkbb;
 extern int get_inode_offset_by_ino(const xfs_dsb_t *sb, const uint64_t ino, int64_t *a_offset);
 extern int get_block_offset_by_blknum(const xfs_dsb_t *sb, const uint64_t blknum, int64_t *a_offset);
 extern int parse_buff_to_inode(xfs_inode_t *inode, const char *buf, const XFS_ENDIAN_ENUM end);
-extern int parse_buff_to_dir_ext(xfs_dir_ext_t *dir_ext, const char *buf, const XFS_ENDIAN_ENUM end);
+extern int parse_buff_to_dir_ext(xfs_dir_ext_t *dir_ext, const char *buf, const uint64_t buf_size, const XFS_ENDIAN_ENUM end);
 extern void free_inode(xfs_inode_t *inode);
 extern void free_dir_ext(xfs_dir_ext_t *dir_ext);
 

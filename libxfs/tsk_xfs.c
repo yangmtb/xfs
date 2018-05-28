@@ -178,10 +178,15 @@ uint8_t xfs_file_add_meta(TSK_FS_INFO *a_fs, TSK_FS_FILE *a_file, TSK_INUM_T a_i
             a_file->meta->type = TSK_FS_META_TYPE_DIR;
         } else if (S_ISREG(xfs_inode->type)) {
             a_file->meta->type = TSK_FS_META_TYPE_REG;
+        } else if (S_ISLNK(xfs_inode->type)) {
+            a_file->meta->type = TSK_FS_META_TYPE_LNK;
+            a_file->meta->link = strdup(xfs_inode->lnk_path);
         } else {
             Dprintf("%s : type others\n", func_name);
         }
         //Dprintf("%s %d: file ok\n", func_name, a_file->name);
+    } else {
+        Dprintf("parse inode:%d err\n", a_inum);
     }
     free_inode(xfs_inode);
     return 0;
@@ -189,6 +194,10 @@ uint8_t xfs_file_add_meta(TSK_FS_INFO *a_fs, TSK_FS_FILE *a_file, TSK_INUM_T a_i
 
 TSK_RETVAL_ENUM xfs_dir_open_meta(TSK_FS_INFO *a_fs, TSK_FS_DIR **a_dir, TSK_INUM_T a_inum)
 {
+    if (0 == a_inum) {
+        Dprintf("inum is 0\n");
+        return TSK_ERR;
+    }
     const char *func_name = "xfs_dir_open_meta";
     //Dprintf("%s comming\n", func_name);
     XFS_INFO *xfs = (XFS_INFO *)a_fs;
@@ -240,84 +249,122 @@ TSK_RETVAL_ENUM xfs_dir_open_meta(TSK_FS_INFO *a_fs, TSK_FS_DIR **a_dir, TSK_INU
         return TSK_ERR;
     }
     ret = parse_buff_to_inode(xfs_dir, buf, xfs->fs_info.endian);
-    if (0 == ret) {
-        if (XFS_DINODE_FMT_EXTENTS & xfs_dir->format && xfs_dir->nblocks > 0) {
-            ret = get_block_offset_by_blknum(&(xfs->sb), xfs_dir->exts->startblock, &off);
-            if (0 != ret) {
-                //Dprintf("%s : get block(%lld) offset err \n", func_name, xfs_dir->startblock);
-                free_inode(xfs_dir);
-                return TSK_ERR;
-            }
-            //Dprintf("%lld block off : %lld, size:%d\n", xfs_dir->startblock, off, xfs_dir->size);
-            char *dir_buf = calloc(1, xfs_dir->size);
-            if (NULL == dir_buf) {
-                Dprintf("%s : calloc dir_buf err\n", func_name);
-                free_inode(xfs_dir);
-                return TSK_ERR;
-            }
-            cnt = tsk_fs_read(a_fs, off, dir_buf, xfs_dir->size);
-            if (cnt != xfs_dir->size) {
-                Dprintf("%s : fs read dir_buf err\n", func_name);
+    if (0 != ret) {
+        Dprintf("prse buff to inode err\n");
+        free_inode(xfs_dir);
+        return TSK_ERR;
+    }
+    if (XFS_DINODE_FMT_EXTENTS & xfs_dir->format && xfs_dir->nblocks > 0) {
+        ext_info_t *ext = NULL;
+        for (int i = 0; i < xfs_dir->extcount; ++i) {
+            ext = &(xfs_dir->exts[i]);
+            for (int k = 0; k < ext->blockcount; ++k) {
+                ret = get_block_offset_by_blknum(&(xfs->sb), ext->startblock+k, &off);
+                if (0 != ret) {
+                    Dprintf("%s : get block(%lld) offset err \n", func_name, ext->startblock+k);
+                    free_inode(xfs_dir);
+                    return TSK_ERR;
+                }
+                char *dir_buf = calloc(/*ext->blockcount*/1, xfs->sb.sb_blocksize);
+                if (NULL == dir_buf) {
+                    Dprintf("%s : calloc dir_buf err\n", func_name);
+                    free_inode(xfs_dir);
+                    return TSK_ERR;
+                }
+                cnt = tsk_fs_read(a_fs, off, dir_buf, /*ext->blockcount */ xfs->sb.sb_blocksize);
+                if (cnt != /*ext->blockcount */ xfs->sb.sb_blocksize) {
+                    Dprintf("%s : fs read dir_buf err\n", func_name);
+                    free(dir_buf);
+                    free_inode(xfs_dir);
+                    return TSK_ERR;
+                }
+                xfs_dir_ext_t *xfs_dir_ext = calloc(1, sizeof(xfs_dir_ext_t));
+                ret = parse_buff_to_dir_ext(xfs_dir_ext, dir_buf, cnt, xfs->fs_info.endian);
+                if (ret != 0) {
+                    //Dprintf("parse buff to dir ext err\n");
+                    free(dir_buf);
+                    free_dir_ext(xfs_dir_ext);
+                    continue;
+                }
+                TSK_FS_NAME *name = tsk_fs_name_alloc(256, 0);
+                if (NULL != name) {
+                    xfs_dir3_entry_t *entry = NULL;
+                    for (int j = 0; j < xfs_dir_ext->subcount; ++j) {
+                        entry = &(xfs_dir_ext->entrys[j]);
+                        name->meta_addr = entry->inumber;
+                        name->flags = TSK_FS_NAME_FLAG_ALLOC;
+                        memset(name->name, 0, name->name_size);
+                        strncpy(name->name, entry->name, name->name_size-1);
+                        switch (entry->filetype) {
+                        case DIR_SUB_FILE:
+                            name->type = (TSK_FS_NAME_TYPE_REG);
+                            break;
+                        case DIR_SUB_DIR:
+                            name->type = (TSK_FS_NAME_TYPE_DIR);
+                            break;
+                        case DIR_SUB_LNK:
+                            name->type = (TSK_FS_NAME_TYPE_LNK);
+                            break;
+                        default:
+                            Dprintf("switch others a_inum:%d:meta:%d, type:%d\n", a_inum, name->meta_addr, entry->filetype);
+                            continue;
+                            free(dir_buf);
+                            tsk_fs_name_free(name);
+                            free_inode(xfs_dir);
+                            free_dir_ext(xfs_dir_ext);
+                            return TSK_ERR;
+                        }
+                        tsk_fs_dir_add(dir, name);
+                    }
+                    tsk_fs_name_free(name);
+                } else {
+                    Dprintf("name alloc err\n");
+                    free(dir_buf);
+                    free_inode(xfs_dir);
+                    free_dir_ext(xfs_dir_ext);
+                    return TSK_ERR;
+                }
                 free(dir_buf);
-                free_inode(xfs_dir);
-                return TSK_ERR;
+                free_dir_ext(xfs_dir_ext);
             }
-            xfs_dir_ext_t *xfs_dir_ext = calloc(1, sizeof(xfs_dir_ext_t));
-            ret = parse_buff_to_dir_ext(xfs_dir_ext, dir_buf, xfs->fs_info.endian);
-            TSK_FS_NAME *name = tsk_fs_name_alloc(256, 0);
-            if (NULL != name) {
-                for (int i = 0; i < xfs_dir_ext->subcount; ++i) {
-                    xfs_dir3_entry_t *entry = &(xfs_dir_ext->entrys[i]);
-                    name->meta_addr = entry->inumber;
-                    name->flags = TSK_FS_NAME_FLAG_ALLOC;
-                    memset(name->name, 0, name->name_size);
-                    strncpy(name->name, entry->name, name->name_size-1);
-                    switch (entry->filetype) {
-                    case DIR_SUB_FILE:
-                        name->type = (TSK_FS_NAME_TYPE_REG);
-                        break;
-                    case DIR_SUB_DIR:
-                        name->type = (TSK_FS_NAME_TYPE_DIR);
-                        break;
-                    default:
-                        Dprintf("%s : switch others%d\n", func_name, entry->filetype);
-                    }
-                    tsk_fs_dir_add(dir, name);
-                }
-                tsk_fs_name_free(name);
-            }
-            //for (int j = 0; j < xfs_dir_ext->subcount; ++j) {
-                //xfs_dir3_entry_t *entry = &(xfs_dir_ext->entrys[j]);
-                //Dprintf("%d %d %d: tag:%x name:%s\n", entry, j, entry->inumber, entry->tag, entry->name);
-                //Dprintf("%d i:%2d inumber:%7lld tag:%4x len:%2d pad:%d name:%s\n", entry, j, entry->inumber, entry->tag, entry->namelen, ((19+entry->namelen)&0xFFF8) - (12+entry->namelen), entry->name);
-            //}
-            free(dir_buf);
-            free_dir_ext(xfs_dir_ext);
-        } else if (XFS_DINODE_FMT_LOCAL & xfs_dir->format) {
-            TSK_FS_NAME *name = tsk_fs_name_alloc(256, 0);
-            if (NULL != name) {
-                for (int i = 0; i < xfs_dir->u3.count; ++i) {
-                    name->meta_addr = xfs_dir->list[i].inumber;
-                    name->flags = TSK_FS_NAME_FLAG_ALLOC;
-                    memset(name->name, 0, name->name_size);
-                    strncpy(name->name, xfs_dir->list[i].name, name->name_size-1);
-                    switch (xfs_dir->list[i].filetype) {
-                    case DIR_SUB_FILE:
-                        name->type = (TSK_FS_NAME_TYPE_REG);
-                        break;
-                    case DIR_SUB_DIR:
-                        name->type = (TSK_FS_NAME_TYPE_DIR);
-                        break;
-                    default:
-                        Dprintf("%s : switch others%d\n", func_name, xfs_dir->list[i].filetype);
-                    }
-                    tsk_fs_dir_add(dir, name);
-                }
-                tsk_fs_name_free(name);
-            }
-        } else {
-            Dprintf("no local no extents:%d %d\n", xfs_dir->format, xfs_dir->type);
         }
+    } else if (XFS_DINODE_FMT_LOCAL & xfs_dir->format) {
+        TSK_FS_NAME *name = tsk_fs_name_alloc(256, 0);
+        if (NULL != name) {
+            for (int i = 0; i < xfs_dir->u3.count; ++i) {
+                name->meta_addr = xfs_dir->list[i].inumber;
+                name->flags = TSK_FS_NAME_FLAG_ALLOC;
+                memset(name->name, 0, name->name_size);
+                strncpy(name->name, xfs_dir->list[i].name, name->name_size-1);
+                switch (xfs_dir->list[i].filetype) {
+                case DIR_SUB_FILE:
+                    name->type = (TSK_FS_NAME_TYPE_REG);
+                    break;
+                case DIR_SUB_DIR:
+                    name->type = (TSK_FS_NAME_TYPE_DIR);
+                    break;
+                case DIR_SUB_LNK:
+                    name->type = (TSK_FS_NAME_TYPE_LNK);
+                    break;
+                default:
+                    Dprintf("switch others a_inum:%d:meta:%d, type:%d\n", a_inum, name->meta_addr, xfs_dir->list[i].filetype);
+                    continue;
+                    tsk_fs_name_free(name);
+                    free_inode(xfs_dir);
+                    return TSK_ERR;
+                }
+                tsk_fs_dir_add(dir, name);
+            }
+            tsk_fs_name_free(name);
+        } else {
+            Dprintf("name alloc err\n");
+            free_inode(xfs_dir);
+            return TSK_ERR;
+        }
+    } else {
+        Dprintf("no local no extents:%d %d\n", xfs_dir->format, xfs_dir->type);
+        free_inode(xfs_dir);
+        return TSK_ERR;
     }
     free_inode(xfs_dir);
 

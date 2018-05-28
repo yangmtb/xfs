@@ -21,7 +21,6 @@ int get_inode_offset_by_ino(const xfs_dsb_t *sb, const uint64_t ino, int64_t *a_
     uint32_t agino = XFS_INO_TO_AGINO(sb, ino);
     uint32_t agbno = XFS_AGINO_TO_AGBNO(sb, agino);
     int offset = XFS_AGINO_TO_OFFSET(sb, agino);
-    //Dprintf(":%d %d %d %d\n", agno, agino, agbno, offset);
     if (agno >= sb->sb_agcount || agbno >= sb->sb_agblocks || offset >= sb->sb_inopblock || XFS_AGINO_TO_INO(sb, agno, agino) != ino) {
         Dprintf("%s : bad inode number %lld\n", func_name, ino);
         return 1;
@@ -39,7 +38,6 @@ int get_inode_offset_by_ino(const xfs_dsb_t *sb, const uint64_t ino, int64_t *a_
     *a_offset = XFS_AGB_TO_DADDR(sb, agno, cluster_agbno);
     *a_offset = *a_offset << BBSHIFT;
     *a_offset += offset << sb->sb_inodelog;
-    //Dprintf("yes:%lld\n", (*a_offset));
     return 0;
 }
 
@@ -58,7 +56,7 @@ int get_block_offset_by_blknum(const xfs_dsb_t *sb, const uint64_t blknum, int64
     }
     *a_offset = XFS_AGB_TO_DADDR(sb, agno, agbno);
     *a_offset = *a_offset << BBSHIFT;
-    Dprintf("blk offset:%lld\n", *a_offset);
+    //Dprintf("blk offset:%lld\n", *a_offset);
     return 0;
 }
 
@@ -84,10 +82,8 @@ int parse_buff_to_inode(xfs_inode_t *inode, const char *buf, const XFS_ENDIAN_EN
         Dprintf("%s : magic(%x) not match\n", func_name, inode->magic);
         return 1;
     }
-    //Dprintf("inode magic :%x\n", inode->magic);
     inode->type = (xfs_getu16(end, &buf[off]) & 0xFE00);
     inode->mode = (xfs_getu16(end, &buf[off]) & 0x1FF);
-    //Dprintf("type:%o mode:%o\n", inode->type, inode->mode);
     off += 2;
     inode->version = buf[off++];
     inode->format = buf[off++];
@@ -182,7 +178,7 @@ int parse_buff_to_inode(xfs_inode_t *inode, const char *buf, const XFS_ENDIAN_EN
         inode->u3.i4 = xfs_getu32(end, &buf[off]);
         off += 4;
         if (inode->u3.i4 != inode->ino) {
-            Dprintf("i4(%ld) ino(%lld) %s some err\n", inode->u3.i4, inode->ino, func_name);
+            //Dprintf("i4(%ld) ino(%lld) %s some err\n", inode->u3.i4, inode->ino, func_name);
         }
         // for list space
         if (NULL == inode->list) {
@@ -196,7 +192,7 @@ int parse_buff_to_inode(xfs_inode_t *inode, const char *buf, const XFS_ENDIAN_EN
             inode->list[i].namelen = buf[off++];
             inode->list[i].offset = xfs_getu16(end, &buf[off]);
             off += 2;
-            inode->list[i].name = calloc(inode->list[i].namelen, sizeof(char));
+            inode->list[i].name = calloc((inode->list[i].namelen)+1, sizeof(char));
             if (NULL == inode->list[i].name) {
                 Dprintf("%s name calloc is null\n", func_name);
                 return 1;
@@ -207,35 +203,76 @@ int parse_buff_to_inode(xfs_inode_t *inode, const char *buf, const XFS_ENDIAN_EN
             inode->list[i].inumber = xfs_getu32(end, &buf[off]);
             off += 4;
         }
-    } else if (inode->format & XFS_DINODE_FMT_EXTENTS) { // extents
-        inode->exts = calloc(1, sizeof(ext_info_t));
-        if (NULL == inode->exts) {
-            Dprintf("%s :exts is null\n", func_name);
+    } else if ((inode->format & XFS_DINODE_FMT_EXTENTS) && (inode->nblocks > 0)) { // extents
+        // for find how many
+        uint64_t tmpoff = off;
+        uint64_t check = *(uint64_t *)(buf+tmpoff+8);
+        uint32_t blockcount = 0;
+        int i = 0, tmpi = 0;
+        while (0 != check && blockcount < inode->nblocks) {
+            tmpoff += 13;
+            blockcount += (xfs_getu24(end, &buf[tmpoff]) & 0x1FFFFF);
+            tmpoff += 3;
+            i++;
+            check = *(uint64_t *)(buf+tmpoff+8);
+        }
+        //Dprintf("i:%d blockcount:%d\n", i, blockcount);
+
+        if (i > 0) {
+            inode->exts = calloc(i, sizeof(ext_info_t));
+            if (NULL == inode->exts) {
+                Dprintf(" %d exts is null\n", i);
+                return 1;
+            }
+            //check = *(uint64_t *)(buf+off+8);
+            while (0 != i--) {
+                ext_info_t *ext = &(inode->exts[tmpi]);
+                if (NULL == ext) {
+                    Dprintf("%d ext is null.\n", tmpi);
+                    break;
+                }
+                ext->extentflag = ((uint8_t)buf[off] & 0x80) >> 7;
+                ext->startoff = (xfs_getu64(end, &buf[off]) & 0x7FFFFFFFFFFFFE00) >> 9;
+                off += 6;
+                ext->startblock = (xfs_getu64(end, &buf[off]) & 0x7FFFFFFFFFFFFE0) >> 5;
+                off += 7;
+                ext->blockcount = (xfs_getu24(end, &buf[off]) & 0x1FFFFF);
+                off += 3;
+                //Dprintf("type:%d, flag:%d, startoff:%lld, startblock:%lld, blockcount:%ld\n", inode->type, ext->extentflag, ext->startoff, ext->startblock, ext->blockcount);
+                if (S_ISDIR(inode->type)) {
+                    //Dprintf("extent dir.\n");
+                } else if (S_ISREG(inode->type)) {
+                    //Dprintf("extent reg file.\n");
+                } else if (S_ISLNK(inode->type)) {
+                    Dprintf("extent lnk file.\n");
+                } else {
+                    Dprintf("extent others%d.\n", inode->type);
+                }
+                //check = *(uint64_t *)(buf+off+8);
+                tmpi++;
+            }
+            inode->extcount = tmpi;
+            //Dprintf("extcount:%d\n", inode->extcount);
+        } else {
+            Dprintf("i(%d) <= 0\n", i);
+        }
+    } else if (S_ISLNK(inode->type) && inode->size > 0) {
+        inode->lnk_path = calloc(1, inode->size+1);
+        if (NULL == inode->lnk_path) {
+            Dprintf("calloc lnk path err\n");
             return 1;
         }
-        inode->exts->extentflag = ((uint8_t)buf[off] & 0x80) >> 7;
-        inode->exts->startoff = (xfs_getu64(end, &buf[off]) & 0x7FFFFFFFFFFFFE00) >> 9;
-        off += 6;
-        inode->exts->startblock = (xfs_getu64(end, &buf[off]) & 0x7FFFFFFFFFFFFE0) >> 5;
-        off += 7;
-        inode->exts->blockcount = (xfs_getu24(end, &buf[off]) & 0x1FFFFF);
-        off += 3;
-        //Dprintf("type:%d, flag:%d, startoff:%lld, startblock:%lld, blockcount:%ld\n", inode->type, inode->exts->extentflag, inode->exts->startoff, inode->exts->startblock, inode->exts->blockcount);
-        if (S_ISDIR(inode->type)) {
-            //Dprintf("extent dir.\n");
-        } else if (S_ISREG(inode->type)) {
-            //Dprintf("extent reg file.\n");
-        } else {
-            Dprintf("extent others%d.\n", inode->type);
-        }
+        strncpy(inode->lnk_path, buf+off, inode->size);
+    } else if (0 == inode->size) {
+        ;// size == 0
     } else {
-        Dprintf("store others\n");
+        Dprintf("store others %lld format:%d, type:%d size:%d\n", inode->ino, inode->format, inode->type, inode->size);
     }
  
     return 0;
 }
 
-int parse_buff_to_dir_ext(xfs_dir_ext_t *dir_ext, const char *buf, const XFS_ENDIAN_ENUM end)
+int parse_buff_to_dir_ext(xfs_dir_ext_t *dir_ext, const char *buf, const uint64_t buf_size, const XFS_ENDIAN_ENUM end)
 {
     const char *func_name = "parse_buff_to_dir_ext";
     if (NULL == buf) {
@@ -254,6 +291,10 @@ int parse_buff_to_dir_ext(xfs_dir_ext_t *dir_ext, const char *buf, const XFS_END
     //dir_ext = buf;
     dir_ext->hdr.hdr.magic = xfs_getu32(end, &buf[off]);
     off += 4;
+    if ((XFS_DIR3_BLOCK_MAGIC != dir_ext->hdr.hdr.magic) && (XFS_DIR3_DATA_MAGIC != dir_ext->hdr.hdr.magic)) {
+        //Dprintf("magic(%ld) is err, shuld be %ld %ld\n", dir_ext->hdr.hdr.magic, XFS_DIR3_BLOCK_MAGIC, XFS_DIR3_DATA_MAGIC);
+        return 1;
+    }
     dir_ext->hdr.hdr.crc = xfs_getu32(end, &buf[off]);
     off += 4;
     dir_ext->hdr.hdr.blkno = xfs_getu64(end, &buf[off]);
@@ -293,62 +334,50 @@ int parse_buff_to_dir_ext(xfs_dir_ext_t *dir_ext, const char *buf, const XFS_END
     off += 2;
     off += 4;
     uint64_t tmpoff = off;
-    uint16_t check = buf[off];
+    uint16_t check0 = buf[off];
+    uint64_t check1 = xfs_getu64(end, &buf[off]);
     int i = 0, tmpi = 0;
-    while (0xFFFF != check) {
+    while (0xFFFF != check0 && 0 != check1 && (tmpoff < buf_size)) {
         tmpoff += 8;
         unsigned char len = buf[tmpoff++];
         tmpoff += len;
         tmpoff++;
         tmpoff += ((19+len)&0xFFF8) - (12+len);
         tmpoff += 2;
-        //Dprintf("i:%2d\n", i);
         i++;
-        check = buf[tmpoff];
+        check0 = buf[tmpoff];
+        check1 = xfs_getu64(end, &buf[tmpoff]);
     }
     if (i > 0) {
-        check = buf[off];
         dir_ext->entrys = calloc(i, sizeof(xfs_dir3_entry_t));
-        //Dprintf("%d calloc entrys:%d\n", i, sizeof(xfs_dir3_entry_t));
-        //for (int j = 0; j < i; ++j) {
-        //    Dprintf("calloc entrys[%d]:%d %d\n", j, dir_ext->entrys+j, &(dir_ext->entrys[j]));
-        //}
-    }
-    while (0xFFFF != check) {
-        xfs_dir3_entry_t *entry = &(dir_ext->entrys[tmpi]);
-        //Dprintf("entry %d:%d\n", tmpi, entry);
-        if (NULL == entry) {
-            Dprintf("%s : calloc entry err\n", func_name);
-            break;
+        while (i != tmpi) {
+            xfs_dir3_entry_t *entry = &(dir_ext->entrys[tmpi]);
+            if (NULL == entry) {
+                Dprintf("%s : calloc entry err\n", func_name);
+                break;
+            }
+            entry->inumber = xfs_getu64(end, &buf[off]);
+            off += 8;
+            entry->namelen = buf[off++];
+            entry->name = calloc(1, entry->namelen+1);
+            if (NULL == entry->name) {
+                Dprintf("%s : calloc entry name err\n", func_name);
+                return 1;
+            }
+            strncpy(entry->name, buf+off, entry->namelen);
+            off += entry->namelen;
+            entry->filetype = buf[off++];
+            off += ((19+entry->namelen)&0xFFF8) - (12+entry->namelen);
+            entry->tag = xfs_getu16(end, &buf[off]);
+            off += 2;
+            tmpi++;
         }
-        entry->inumber = xfs_getu64(end, &buf[off]);
-        off += 8;
-        entry->namelen = buf[off++];
-        entry->name = calloc(1, entry->namelen+1);
-        //memset(entry->name, 0, 256);
-        //Dprintf("entry name %2d:%d:%d\n", tmpi, entry->name, ((xfs_dir3_entry_t *)&(dir_ext->entrys[tmpi]))->name);
-        if (NULL == entry->name) {
-            Dprintf("%s : calloc entry name err\n", func_name);
-            return 1;
-        }
-        strncpy(entry->name, buf+off, entry->namelen);
-        //Dprintf("%d name:%s\n", i, entry->name);
-        off += entry->namelen;
-        entry->filetype = buf[off++];
-        off += ((19+entry->namelen)&0xFFF8) - (12+entry->namelen);
-        entry->tag = xfs_getu16(end, &buf[off]);
-        off += 2;
-        //Dprintf("%d i:%2d inumber:%7lld tag:%4x len:%2d pad:%d name:%s\n", entry, tmpi, entry->inumber, entry->tag, entry->namelen, ((19+entry->namelen)&0xFFF8) - (12+entry->namelen), entry->name);
-        //ir_ext->entrys[tmpi++] = entry;
-        tmpi++;
-        check = buf[off];
     }
-    //Dprintf("check:%d i:%d tmpi:%d\n", check, i, tmpi);
     if (i != tmpi) {
         Dprintf("i(%d) not tmpi(%d)\n", i, tmpi);
-        return 1;
+        //return 1;
     }
-    dir_ext->subcount = i;
+    dir_ext->subcount = tmpi;
 
     return 0;
 }
@@ -359,6 +388,9 @@ void free_inode(xfs_inode_t *inode)
     if (NULL != inode) {
         if (NULL != (inode->exts)) {
             free(inode->exts);
+        }
+        if (NULL != (inode->lnk_path)) {
+            free(inode->lnk_path);
         }
         if (NULL != inode->list) {
             int i = 0;
